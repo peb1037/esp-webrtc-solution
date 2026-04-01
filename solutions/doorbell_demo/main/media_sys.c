@@ -162,14 +162,17 @@ static int build_player_system()
         ESP_LOGE(TAG, "Fail to create audio render");
         return -1;
     }
-    lcd_render_cfg_t lcd_cfg = {
-        .lcd_handle = board_get_lcd_handle(),
-    };
-    player_sys.video_render = av_render_alloc_lcd_render(&lcd_cfg);
-
-    if (player_sys.video_render == NULL) {
-        ESP_LOGE(TAG, "Fail to create video render");
-        // Allow not display
+    esp_lcd_panel_handle_t lcd_handle = board_get_lcd_handle();
+    if (lcd_handle) {
+        lcd_render_cfg_t lcd_cfg = {
+            .lcd_handle = lcd_handle,
+        };
+        player_sys.video_render = av_render_alloc_lcd_render(&lcd_cfg);
+        if (player_sys.video_render == NULL) {
+            ESP_LOGW(TAG, "Video render disabled (LCD render init failed)");
+        }
+    } else {
+        ESP_LOGI(TAG, "Video render disabled (no LCD handle)");
     }
     av_render_cfg_t render_cfg = {
         .audio_render = player_sys.audio_render,

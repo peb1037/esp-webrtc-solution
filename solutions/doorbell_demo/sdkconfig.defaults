@@ -2,8 +2,14 @@
 # Enable SPIRAM
 CONFIG_SPIRAM=y
 
-# Enable GDBStub
-CONFIG_ESP_SYSTEM_PANIC_GDBSTUB=y
+# Reboot on panic (avoid getting trapped in GDB stub)
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+
+# Work around Wi-Fi sleep/PM crash seen on ESP32-P4 hosted Wi-Fi
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+
+# Hosted Wi-Fi calls into esp_pm; keep PM enabled
+CONFIG_PM_ENABLE=y
 
 # Enable FreeRTOS trace
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y

@@ -34,6 +34,16 @@ static struct {
 
 static char room_url[128];
 
+static char server_url[64] = "https://webrtc.espressif.com";
+
+static void log_room_hint(const char *room)
+{
+    if (room == NULL || room[0] == 0) {
+        return;
+    }
+    ESP_LOGW(TAG, "Room: %s  |  Open: %s/doorbell", room, server_url);
+}
+
 #define RUN_ASYNC(name, body)           \
     void run_async##name(void *arg)     \
     {                                   \
@@ -41,8 +51,6 @@ static char room_url[128];
         media_lib_thread_destroy(NULL); \
     }                                   \
     media_lib_thread_create_from_scheduler(NULL, #name, run_async##name, NULL);
-
-char server_url[64] = "https://webrtc.espressif.com";
 
 static int join_room(int argc, char **argv)
 {
@@ -60,7 +68,12 @@ static int join_room(int argc, char **argv)
     const char *room_id = room_args.room_id->sval[0];
     snprintf(room_url, sizeof(room_url), "%s/join/%s", server_url, room_id);
     ESP_LOGI(TAG, "Start to join in room %s", room_id);
-    start_webrtc(room_url);
+    if (start_webrtc(room_url) == 0) {
+        log_room_hint(room_id);
+    } else {
+        ESP_LOGE(TAG, "Failed to start WebRTC for room %s", room_id);
+        log_room_hint(room_id);
+    }
     return 0;
 }
 
@@ -90,11 +103,44 @@ static int sys_cli(int argc, char **argv)
 
 static int wifi_cli(int argc, char **argv)
 {
-    if (argc < 1) {
+    if (argc < 2) {
+        ESP_LOGE(TAG, "Usage: wifi <ssid...> [password]");
+        ESP_LOGE(TAG, "Tip: if SSID contains spaces, quotes are optional (wifi joins tokens)");
         return -1;
     }
-    char *ssid = argv[1];
-    char *password = argc > 2 ? argv[2] : NULL;
+
+    const char *password = NULL;
+    int ssid_tokens = argc - 1;
+    if (argc >= 3) {
+        password = argv[argc - 1];
+        ssid_tokens = argc - 2;
+    }
+
+    const char *ssid = NULL;
+    char ssid_buf[128] = { 0 };
+    if (ssid_tokens <= 1) {
+        ssid = argv[1];
+    } else {
+        size_t used = 0;
+        for (int i = 0; i < ssid_tokens; i++) {
+            const char *tok = argv[1 + i];
+            if (!tok) {
+                continue;
+            }
+            int written = snprintf(ssid_buf + used, sizeof(ssid_buf) - used, "%s%s", (i == 0) ? "" : " ", tok);
+            if (written <= 0) {
+                break;
+            }
+            used += (size_t)written;
+            if (used >= sizeof(ssid_buf)) {
+                used = sizeof(ssid_buf) - 1;
+                break;
+            }
+        }
+        ssid = ssid_buf;
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi connect request: ssid=\"%s\" (len=%d), password=%s", ssid, (int)strlen(ssid), password ? "set" : "<open>");
     return network_connect_wifi(ssid, password);
 }
 
@@ -292,7 +338,10 @@ static int network_event_handler(bool connected)
             snprintf(room_url, sizeof(room_url), "%s/join/%s", server_url, room);
             ESP_LOGI(TAG, "Start to join in room %s", room);
             if (start_webrtc(room_url) == 0) {
-                ESP_LOGW(TAG, "Please use browser to join in %s on %s/doorbell", room, server_url);
+                log_room_hint(room);
+            } else {
+                ESP_LOGE(TAG, "Failed to start WebRTC, but room is still %s", room);
+                log_room_hint(room);
             }
         });
     } else {
@@ -304,12 +353,36 @@ static int network_event_handler(bool connected)
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
+    // ESP-Hosted / Wi-Fi-Remote stack (ESP32-P4 uses an external Wi-Fi co-processor).
+    // These tags help diagnose SDIO transport bring-up and scan/connect behavior.
+    esp_log_level_set("H_API", ESP_LOG_INFO);
+    esp_log_level_set("transport", ESP_LOG_INFO);
+    esp_log_level_set("sdio_wrapper", ESP_LOG_INFO);
+    esp_log_level_set("rpc_wrap", ESP_LOG_INFO);
+    esp_log_level_set("rpc_evt", ESP_LOG_INFO);
+    esp_log_level_set("esp_adapter", ESP_LOG_INFO);
+    // Keep the interactive console usable: the Wi-Fi driver can spam warnings like
+    // "wifi:m f probe req..." while scanning/connecting.
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+
+    ESP_LOGI(TAG, "FW build: %s %s | IDF: %s", __DATE__, __TIME__, esp_get_idf_version());
     media_lib_add_default_adapter();
     esp_capture_set_thread_scheduler(capture_scheduler);
     media_lib_thread_set_schedule_cb(thread_scheduler);
     init_board();
     media_sys_buildup();
     init_console();
+
+    if (strcmp(WIFI_SSID, "XXXX") == 0) {
+        ESP_LOGW(TAG, "WIFI_SSID/WIFI_PASSWORD still set to placeholder. Use the CLI: wifi <ssid> <password>");
+    }
+    ESP_LOGI(TAG, "Signaling server: %s", server_url);
+
+    char *room = gen_room_id_use_mac();
+    ESP_LOGW(TAG, "Auto room (from MAC): %s", room);
+    ESP_LOGI(TAG, "Signaling URL: %s/join/%s", server_url, room);
+    log_room_hint(room);
+
     network_init(WIFI_SSID, WIFI_PASSWORD, network_event_handler);
     while (1) {
         media_lib_thread_sleep(2000);

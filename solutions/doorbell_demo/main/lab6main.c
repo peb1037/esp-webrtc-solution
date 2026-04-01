@@ -90,11 +90,44 @@ static int sys_cli(int argc, char **argv)
 
 static int wifi_cli(int argc, char **argv)
 {
-    if (argc < 1) {
+    if (argc < 2) {
+        ESP_LOGE(TAG, "Usage: wifi <ssid...> [password]");
+        ESP_LOGE(TAG, "Tip: if SSID contains spaces, quotes are optional (wifi joins tokens)");
         return -1;
     }
-    char *ssid = argv[1];
-    char *password = argc > 2 ? argv[2] : NULL;
+
+    const char *password = NULL;
+    int ssid_tokens = argc - 1;
+    if (argc >= 3) {
+        password = argv[argc - 1];
+        ssid_tokens = argc - 2;
+    }
+
+    const char *ssid = NULL;
+    char ssid_buf[128] = { 0 };
+    if (ssid_tokens <= 1) {
+        ssid = argv[1];
+    } else {
+        size_t used = 0;
+        for (int i = 0; i < ssid_tokens; i++) {
+            const char *tok = argv[1 + i];
+            if (!tok) {
+                continue;
+            }
+            int written = snprintf(ssid_buf + used, sizeof(ssid_buf) - used, "%s%s", (i == 0) ? "" : " ", tok);
+            if (written <= 0) {
+                break;
+            }
+            used += (size_t)written;
+            if (used >= sizeof(ssid_buf)) {
+                used = sizeof(ssid_buf) - 1;
+                break;
+            }
+        }
+        ssid = ssid_buf;
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi connect request: ssid=\"%s\" (len=%d), password=%s", ssid, (int)strlen(ssid), password ? "set" : "<open>");
     return network_connect_wifi(ssid, password);
 }
 
@@ -304,6 +337,19 @@ static int network_event_handler(bool connected)
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
+    // ESP-Hosted / Wi-Fi-Remote stack (ESP32-P4 uses an external Wi-Fi co-processor).
+    // These tags help diagnose SDIO transport bring-up and scan/connect behavior.
+    esp_log_level_set("H_API", ESP_LOG_INFO);
+    esp_log_level_set("transport", ESP_LOG_INFO);
+    esp_log_level_set("sdio_wrapper", ESP_LOG_INFO);
+    esp_log_level_set("rpc_wrap", ESP_LOG_INFO);
+    esp_log_level_set("rpc_evt", ESP_LOG_INFO);
+    esp_log_level_set("esp_adapter", ESP_LOG_INFO);
+    // Keep the interactive console usable: the Wi-Fi driver can spam warnings like
+    // "wifi:m f probe req..." while scanning/connecting.
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+
+    ESP_LOGI(TAG, "FW build: %s %s | IDF: %s", __DATE__, __TIME__, esp_get_idf_version());
     media_lib_add_default_adapter();
     esp_capture_set_thread_scheduler(capture_scheduler);
     media_lib_thread_set_schedule_cb(thread_scheduler);
