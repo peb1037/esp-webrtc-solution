@@ -13,6 +13,7 @@
 #include <esp_system.h>
 #include <nvs_flash.h>
 #include <sys/param.h>
+#include <time.h>
 #include "argtable3/argtable3.h"
 #include "esp_console.h"
 #include "esp_webrtc.h"
@@ -24,6 +25,7 @@
 #include "settings.h"
 #include "common.h"
 #include "esp_capture.h"
+#include "cloud/cloud_ctrl.h"
 
 static const char *TAG = "Webrtc_Test";
 
@@ -32,10 +34,30 @@ static struct {
     struct arg_end *end;
 } room_args;
 
+#if !WEBRTC_USE_LIVEKIT_WHIP
 static char room_url[128];
+#endif
 
 static char server_url[64] = "https://webrtc.espressif.com";
 
+static void ensure_time_is_set(void)
+{
+    static bool sntp_started = false;
+    if (!sntp_started) {
+        webrtc_utils_time_sync_init();
+        sntp_started = true;
+    }
+
+    time_t now = 0;
+    time(&now);
+    if (now < 1700000000) {
+        webrtc_utils_wait_for_time_sync(10000);
+        time(&now);
+    }
+    ESP_LOGI(TAG, "System time (epoch): %ld", (long)now);
+}
+
+#if !WEBRTC_USE_LIVEKIT_WHIP
 static void log_room_hint(const char *room)
 {
     if (room == NULL || room[0] == 0) {
@@ -43,6 +65,7 @@ static void log_room_hint(const char *room)
     }
     ESP_LOGW(TAG, "Room: %s  |  Open: %s/doorbell", room, server_url);
 }
+#endif
 
 #define RUN_ASYNC(name, body)           \
     void run_async##name(void *arg)     \
@@ -54,6 +77,17 @@ static void log_room_hint(const char *room)
 
 static int join_room(int argc, char **argv)
 {
+#if WEBRTC_USE_LIVEKIT_WHIP
+    (void)argc;
+    (void)argv;
+    if (LIVEKIT_WHIP_URL[0] == 0) {
+        ESP_LOGE(TAG, "LIVEKIT_WHIP_URL is empty (see settings.h)");
+        return -1;
+    }
+    ensure_time_is_set();
+    ESP_LOGI(TAG, "Starting WHIP ingest: %s", LIVEKIT_WHIP_URL);
+    return start_webrtc((char *)LIVEKIT_WHIP_URL);
+#else
     int nerrors = arg_parse(argc, argv, (void **)&room_args);
     if (nerrors != 0) {
         arg_print_errors(stderr, room_args.end, argv[0]);
@@ -75,6 +109,7 @@ static int join_room(int argc, char **argv)
         log_room_hint(room_id);
     }
     return 0;
+#endif
 }
 
 static int leave_room(int argc, char **argv)
@@ -320,6 +355,7 @@ static void capture_scheduler(const char *name, esp_capture_thread_schedule_cfg_
     schedule_cfg->core_id = cfg.core_id;
 }
 
+#if !WEBRTC_USE_LIVEKIT_WHIP
 static char* gen_room_id_use_mac(void)
 {
     static char room_mac[16];
@@ -328,12 +364,24 @@ static char* gen_room_id_use_mac(void)
     snprintf(room_mac, sizeof(room_mac)-1, "esp_%02x%02x%02x", mac[3], mac[4], mac[5]);
     return room_mac;
 }
+#endif
 
 static int network_event_handler(bool connected)
 {
+    cloud_ctrl_on_network(connected);
     if (connected) {
         // Enter into Room directly
         RUN_ASYNC(start, {
+            ensure_time_is_set();
+#if WEBRTC_USE_LIVEKIT_WHIP
+            if (LIVEKIT_WHIP_URL[0] == 0) {
+                ESP_LOGE(TAG, "LIVEKIT_WHIP_URL is empty (see settings.h)");
+            } else {
+                ESP_LOGI(TAG, "Starting WHIP ingest: %s", LIVEKIT_WHIP_URL);
+                int r = start_webrtc((char *)LIVEKIT_WHIP_URL);
+                ESP_LOGI(TAG, "WHIP start_webrtc() returned: %d", r);
+            }
+#else
             char *room = gen_room_id_use_mac();
             snprintf(room_url, sizeof(room_url), "%s/join/%s", server_url, room);
             ESP_LOGI(TAG, "Start to join in room %s", room);
@@ -343,6 +391,7 @@ static int network_event_handler(bool connected)
                 ESP_LOGE(TAG, "Failed to start WebRTC, but room is still %s", room);
                 log_room_hint(room);
             }
+#endif
         });
     } else {
         stop_webrtc();
@@ -370,18 +419,43 @@ void app_main(void)
     esp_capture_set_thread_scheduler(capture_scheduler);
     media_lib_thread_set_schedule_cb(thread_scheduler);
     init_board();
-    media_sys_buildup();
+    if (media_sys_buildup() != 0) {
+        ESP_LOGE(TAG, "media_sys_buildup failed, stopping startup");
+        while (1) {
+            media_lib_thread_sleep(1000);
+        }
+    }
     init_console();
+    cloud_ctrl_init();
 
     if (strcmp(WIFI_SSID, "XXXX") == 0) {
         ESP_LOGW(TAG, "WIFI_SSID/WIFI_PASSWORD still set to placeholder. Use the CLI: wifi <ssid> <password>");
     }
+    ESP_LOGI(TAG, "LiveKit WHIP mode: %s", WEBRTC_USE_LIVEKIT_WHIP ? "ENABLED" : "DISABLED");
+#if WEBRTC_USE_LIVEKIT_WHIP
+    if (LIVEKIT_WHIP_URL[0] == 0) {
+        ESP_LOGW(TAG, "LIVEKIT_WHIP_URL is empty (see settings.h)");
+    } else {
+        ESP_LOGI(TAG, "WHIP URL: %s", LIVEKIT_WHIP_URL);
+    }
+#else
     ESP_LOGI(TAG, "Signaling server: %s", server_url);
+#endif
 
+    if (AWS_IOT_ENDPOINT[0] == 0 || strstr(AWS_IOT_ENDPOINT, "xxxx") != NULL) {
+        ESP_LOGW(TAG, "AWS_IOT_ENDPOINT not configured (see settings.h)");
+    } else {
+        ESP_LOGI(TAG, "AWS IoT: endpoint=%s cmd=%s evt=%s", AWS_IOT_ENDPOINT, AWS_IOT_TOPIC_CMD, AWS_IOT_TOPIC_EVT);
+    }
+
+#if WEBRTC_USE_LIVEKIT_WHIP
+    ESP_LOGI(TAG, "Room hint/log URL disabled in WHIP mode (legacy AppRTC flow)");
+#else
     char *room = gen_room_id_use_mac();
     ESP_LOGW(TAG, "Auto room (from MAC): %s", room);
     ESP_LOGI(TAG, "Signaling URL: %s/join/%s", server_url, room);
     log_room_hint(room);
+#endif
 
     network_init(WIFI_SSID, WIFI_PASSWORD, network_event_handler);
     while (1) {

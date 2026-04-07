@@ -9,6 +9,9 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "esp_webrtc.h"
 
 #ifdef __cplusplus
@@ -67,6 +70,22 @@ int play_music(const uint8_t *data, int size, int duration);
  *      - Others  Fail to stop
  */
 int stop_music(void);
+
+/**
+ * @brief  Capture a single JPEG frame from the camera
+ *
+ * @note  Requires that the capture system has been built with an MJPEG sink
+ *        (the doorbell demo configures this during `media_sys_buildup()`).
+ *
+ * @param[out] out_jpeg      Allocated JPEG buffer (caller must free)
+ * @param[out] out_jpeg_len  JPEG length
+ * @param[in]  timeout_ms    Max time to wait for a frame
+ *
+ * @return
+ *      - 0       On success
+ *      - Others  On failure
+ */
+int media_sys_capture_photo_jpeg(uint8_t **out_jpeg, size_t *out_jpeg_len, int timeout_ms);
 
 #ifdef __cplusplus
 }

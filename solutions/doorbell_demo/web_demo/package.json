@@ -1,0 +1,26 @@
+{
+  "name": "birdfeeder-web-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n SERVER,UI -c blue,green \"node server.js\" \"vite\"",
+    "dev:ui": "vite",
+    "dev:server": "node server.js",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@aws-sdk/client-iot-data-plane": "^3.758.0",
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@aws-sdk/s3-request-presigner": "^3.758.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.19.2",
+    "livekit-client": "^2.11.0",
+    "livekit-server-sdk": "^2.15.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.2.0"
+  }
+}

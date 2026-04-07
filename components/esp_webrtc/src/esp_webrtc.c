@@ -110,6 +110,9 @@ typedef struct {
     uint8_t  vid_send_num;
     uint8_t  aud_recv_num;
     uint8_t  vid_recv_num;
+    uint32_t vid_acq_fail_num;
+    int      vid_last_acq_err;
+    uint32_t vid_send_fail_num;
 } webrtc_t;
 
 static const char *TAG = "webrtc";
@@ -144,7 +147,7 @@ static void _media_send(void *ctx)
         esp_capture_stream_frame_t video_frame = {
             .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
         };
-        int ret = esp_capture_sink_acquire_frame(rtc->capture_path, &video_frame, true);
+        int ret = esp_capture_sink_acquire_frame(rtc->capture_path, &video_frame, false);
         if (ret == ESP_CAPTURE_ERR_OK) {
             if (rtc->rtc_cfg.peer_cfg.enable_data_channel && rtc->rtc_cfg.peer_cfg.video_over_data_channel) {
                 esp_peer_data_frame_t data_frame = {
@@ -168,7 +171,15 @@ static void _media_send(void *ctx)
                     }
                 }
                 if (should_send) {
-                    esp_peer_send_video(rtc->pc, &video_send_frame);
+                    int send_ret = esp_peer_send_video(rtc->pc, &video_send_frame);
+                    if (send_ret != ESP_PEER_ERR_NONE) {
+                        rtc->vid_send_fail_num++;
+                        if ((rtc->vid_send_fail_num % 50) == 1) {
+                            ESP_LOGW(TAG, "Video RTP send failed ret=%d fails=%u size=%d pts=%u",
+                                     send_ret, (unsigned)rtc->vid_send_fail_num,
+                                     video_send_frame.size, (unsigned)video_send_frame.pts);
+                        }
+                    }
                 }
             }
             esp_capture_sink_release_frame(rtc->capture_path, &video_frame);
@@ -177,6 +188,14 @@ static void _media_send(void *ctx)
             rtc->vid_send_size += video_frame.size;
             if (webrtc_tracing) {
                 printf("V\n");
+            }
+            rtc->vid_acq_fail_num = 0;
+            rtc->vid_last_acq_err = ESP_CAPTURE_ERR_OK;
+        } else {
+            rtc->vid_acq_fail_num++;
+            rtc->vid_last_acq_err = ret;
+            if ((rtc->vid_acq_fail_num % 100) == 1) {
+                ESP_LOGW(TAG, "No video frame from capture ret=%d fails=%u", ret, (unsigned)rtc->vid_acq_fail_num);
             }
         }
     }
@@ -195,8 +214,14 @@ void media_send_task(void *arg)
 
 static int start_stream(webrtc_t *rtc)
 {
+    if (rtc->send_going) {
+        return ESP_CAPTURE_ERR_OK;
+    }
     int ret = esp_capture_start(rtc->media_provider.capture);
-    if (ret == ESP_CAPTURE_ERR_OK) {
+    if (ret == ESP_CAPTURE_ERR_OK || ret == ESP_CAPTURE_ERR_INVALID_STATE) {
+        if (ret == ESP_CAPTURE_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Capture already started, continue with sender task");
+        }
         media_lib_thread_handle_t handle = NULL;
         rtc->send_going = true;
         ret = media_lib_thread_create_from_scheduler(&handle, "pc_send", media_send_task, rtc);
@@ -247,9 +272,16 @@ static int pc_on_state(esp_peer_state_t state, void *ctx)
     if (state == ESP_PEER_STATE_CANDIDATE_GATHERING) {
         pc_notify_app(rtc, ESP_WEBRTC_EVENT_CONNECTING);
     } else if (state == ESP_PEER_STATE_CONNECTED) {
-        start_stream(rtc);
+        int ret = start_stream(rtc);
+        if (ret != ESP_CAPTURE_ERR_OK && ret != ESP_CAPTURE_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Start stream on CONNECTED failed: %d", ret);
+        }
         pc_notify_app(rtc, ESP_WEBRTC_EVENT_CONNECTED);
     } else if (state == ESP_PEER_STATE_PAIRED) {
+        int ret = start_stream(rtc);
+        if (ret != ESP_CAPTURE_ERR_OK && ret != ESP_CAPTURE_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Start stream on PAIRED failed: %d", ret);
+        }
         pc_notify_app(rtc, ESP_WEBRTC_EVENT_PAIRED);
     } else if (state == ESP_PEER_STATE_DISCONNECTED) {
         stop_stream(rtc);
@@ -673,6 +705,68 @@ static int signal_connected(void *ctx)
     return 0;
 }
 
+static int copy_sdp_line(char *dst, int dst_cap, int *dst_len, const char *line, int line_len)
+{
+    if (*dst_len + line_len + 2 >= dst_cap) {
+        return -1;
+    }
+    memcpy(dst + *dst_len, line, line_len);
+    *dst_len += line_len;
+    dst[(*dst_len)++] = '\r';
+    dst[(*dst_len)++] = '\n';
+    return 0;
+}
+
+static int dedupe_mline_payloads(const char *line, int line_len, char *out, int out_cap)
+{
+    int in = 0;
+    int out_len = 0;
+    int token_idx = 0;
+    char last_payload[24] = {0};
+    int last_payload_len = 0;
+
+    while (in < line_len) {
+        while (in < line_len && line[in] == ' ') {
+            in++;
+        }
+        if (in >= line_len) {
+            break;
+        }
+        int start = in;
+        while (in < line_len && line[in] != ' ') {
+            in++;
+        }
+        int tok_len = in - start;
+        bool skip = false;
+        if (token_idx >= 3) {
+            if (tok_len == last_payload_len && tok_len > 0 && memcmp(line + start, last_payload, tok_len) == 0) {
+                skip = true;
+            }
+        }
+        if (!skip) {
+            if (out_len > 0) {
+                if (out_len + 1 >= out_cap) {
+                    return -1;
+                }
+                out[out_len++] = ' ';
+            }
+            if (out_len + tok_len >= out_cap) {
+                return -1;
+            }
+            memcpy(out + out_len, line + start, tok_len);
+            out_len += tok_len;
+            if (token_idx >= 3) {
+                int copy_len = tok_len < (int)sizeof(last_payload) - 1 ? tok_len : (int)sizeof(last_payload) - 1;
+                memcpy(last_payload, line + start, copy_len);
+                last_payload[copy_len] = 0;
+                last_payload_len = copy_len;
+            }
+        }
+        token_idx++;
+    }
+    return out_len;
+}
+
 static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
 {
     webrtc_t *rtc = (webrtc_t *)ctx;
@@ -717,8 +811,122 @@ static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
             .data = msg->data,
             .size = msg->size,
         };
-        if (STR_SAME(sdp, "candidate:")) {
+        if (msg->data && msg->size >= 2 && msg->data[0] == 'v' && msg->data[1] == '=') {
+            peer_msg.type = ESP_PEER_MSG_TYPE_SDP;
+        } else if (STR_SAME(sdp, "candidate:") || STR_SAME(sdp, "a=candidate:")) {
             peer_msg.type = ESP_PEER_MSG_TYPE_CANDIDATE;
+        }
+        ESP_LOGI(TAG, "Signal msg mapped: in_type=%d out_type=%d size=%d", (int)msg->type, (int)peer_msg.type, msg->size);
+
+        // Some signaling servers return SDP with LF-only line endings.
+        // Normalize to CRLF to keep downstream SDP parsing consistent.
+        if (peer_msg.type == ESP_PEER_MSG_TYPE_SDP && msg->data && msg->size > 0) {
+            int max_size = msg->size * 2 + 256;
+            char *normalized = calloc(1, max_size);
+            if (normalized) {
+                int out = 0;
+                for (int i = 0; i < msg->size && out < max_size - 2; i++) {
+                    char c = (char)msg->data[i];
+                    if (c == '\r') {
+                        normalized[out++] = '\r';
+                        if (i + 1 < msg->size && (char)msg->data[i + 1] == '\n') {
+                            normalized[out++] = '\n';
+                            i++;
+                        } else {
+                            normalized[out++] = '\n';
+                        }
+                    } else if (c == '\n') {
+                        normalized[out++] = '\r';
+                        normalized[out++] = '\n';
+                    } else {
+                        normalized[out++] = c;
+                    }
+                }
+                // Sanitize SDP for stricter peer parser compatibility:
+                // 1) Collapse adjacent duplicated fmt payloads in m-lines (e.g. "102 102")
+                // 2) Drop adjacent duplicate attribute lines
+                // 3) Inject `a=mid:<idx>` only if a media section misses it.
+                int patched_cap = out + 512;
+                char *patched = calloc(1, patched_cap);
+                int patched_len = 0;
+                int injected_mid = 0;
+                int dedup_lines = 0;
+                int section_idx = -1;
+                bool section_has_mid = false;
+                char prev_line[160] = {0};
+                int prev_line_len = 0;
+                if (patched) {
+                    for (int i = 0; i < out;) {
+                        int line_start = i;
+                        int line_end = i;
+                        while (line_end < out && !(normalized[line_end] == '\r' && line_end + 1 < out && normalized[line_end + 1] == '\n')) {
+                            line_end++;
+                        }
+                        if (line_end <= out) {
+                            int line_len = line_end - line_start;
+                            const char *line = normalized + line_start;
+                            char line_buf[256] = {0};
+                            const char *emit_line = line;
+                            int emit_len = line_len;
+
+                            if (line_len >= 2 && line[0] == 'm' && line[1] == '=') {
+                                section_idx++;
+                                section_has_mid = false;
+                                int rebuilt_len = dedupe_mline_payloads(line, line_len, line_buf, sizeof(line_buf));
+                                if (rebuilt_len > 0) {
+                                    emit_line = line_buf;
+                                    emit_len = rebuilt_len;
+                                }
+                            }
+
+                            if (line_len >= 6 && memcmp(line, "a=mid:", 6) == 0) {
+                                section_has_mid = true;
+                            }
+
+                            if (emit_len == prev_line_len && emit_len > 0 && memcmp(emit_line, prev_line, emit_len) == 0) {
+                                dedup_lines++;
+                            } else {
+                                if (copy_sdp_line(patched, patched_cap, &patched_len, emit_line, emit_len) != 0) {
+                                    break;
+                                }
+                                int save_len = emit_len < (int)sizeof(prev_line) - 1 ? emit_len : (int)sizeof(prev_line) - 1;
+                                memcpy(prev_line, emit_line, save_len);
+                                prev_line[save_len] = 0;
+                                prev_line_len = save_len;
+                            }
+
+                            if ((line_len >= 10 && memcmp(line, "a=recvonly", 10) == 0) ||
+                                (line_len >= 10 && memcmp(line, "a=sendonly", 10) == 0) ||
+                                (line_len >= 10 && memcmp(line, "a=sendrecv", 10) == 0) ||
+                                (line_len >= 10 && memcmp(line, "a=inactive", 10) == 0)) {
+                                if (section_idx >= 0 && section_has_mid == false) {
+                                    int w = snprintf(patched + patched_len, patched_cap - patched_len, "a=mid:%d\r\n", section_idx);
+                                    if (w > 0 && patched_len + w < patched_cap) {
+                                        patched_len += w;
+                                        injected_mid++;
+                                        section_has_mid = true;
+                                    }
+                                }
+                            }
+                        }
+                        i = (line_end + 1 < out) ? (line_end + 2) : out;
+                    }
+                    peer_msg.data = (uint8_t *)patched;
+                    peer_msg.size = patched_len;
+                    ESP_LOGI(TAG, "Normalized SDP: %d -> %d bytes, dedup_lines=%d, injected_mid=%d",
+                             msg->size, patched_len, dedup_lines, injected_mid);
+                } else {
+                    peer_msg.data = (uint8_t *)normalized;
+                    peer_msg.size = out;
+                    ESP_LOGI(TAG, "Normalized SDP line endings: %d -> %d bytes", msg->size, out);
+                }
+                int ret = esp_peer_send_msg(rtc->pc, &peer_msg);
+                if (patched) {
+                    free(patched);
+                }
+                free(normalized);
+                return ret;
+            }
         }
         return esp_peer_send_msg(rtc->pc, &peer_msg);
     }

@@ -19,9 +19,9 @@ extern "C" {
  * @brief  Video resolution settings
  */
 #if CONFIG_IDF_TARGET_ESP32P4
-#define VIDEO_WIDTH  1920
-#define VIDEO_HEIGHT 1080
-#define VIDEO_FPS    25
+#define VIDEO_WIDTH  640
+#define VIDEO_HEIGHT 360
+#define VIDEO_FPS    10
 #else
 #define VIDEO_WIDTH  320
 #define VIDEO_HEIGHT 240
@@ -37,6 +37,43 @@ extern "C" {
  * @brief  Set for wifi password
  */
 #define WIFI_PASSWORD "XXXX"
+
+/**
+ * @brief  AWS IoT Core MQTT endpoint (ATS)
+ *
+ * Example: "xxxxxxxxxxxxx-ats.iot.us-east-1.amazonaws.com"
+ */
+#define AWS_IOT_ENDPOINT "xxxx-ats.iot.<region>.amazonaws.com"
+
+/**
+ * @brief  AWS IoT MQTT client id (optional)
+ */
+#define AWS_IOT_CLIENT_ID ""
+
+/**
+ * @brief  MQTT topic for device commands (web -> device)
+ */
+#define AWS_IOT_TOPIC_CMD "birdfeeder/cmd"
+
+/**
+ * @brief  MQTT topic for device events (device -> web)
+ */
+#define AWS_IOT_TOPIC_EVT "birdfeeder/evt"
+
+/**
+ * @brief  Use LiveKit WHIP ingest instead of the default APPRTC demo signaling
+ */
+#define WEBRTC_USE_LIVEKIT_WHIP (1)
+
+/**
+ * @brief  LiveKit WHIP ingest URL
+ */
+#define LIVEKIT_WHIP_URL "https://livebirdfeeder-9z22w034.whip.livekit.cloud/w/ScLMk4xA4HLJ"
+
+/**
+ * @brief  LiveKit WHIP Bearer token
+ */
+#define LIVEKIT_WHIP_BEARER_TOKEN ""
 
 /**
  * @brief  Whether enable data channel

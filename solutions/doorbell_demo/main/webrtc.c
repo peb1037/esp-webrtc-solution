@@ -176,6 +176,13 @@ int start_webrtc(char *url)
     media_lib_thread_handle_t key_thread;
     media_lib_thread_create_from_scheduler(&key_thread, "Key", key_monitor_thread, NULL);
 
+#if WEBRTC_USE_LIVEKIT_WHIP
+    esp_peer_signaling_whip_cfg_t whip_sig_cfg = {
+        .auth_type = ESP_PEER_SIGNALING_WHIP_AUTH_TYPE_BEARER,
+        .token = (char *)LIVEKIT_WHIP_BEARER_TOKEN,
+    };
+#endif
+
     esp_peer_default_cfg_t peer_cfg = {
         .agent_recv_timeout = 500,
     };
@@ -185,7 +192,7 @@ int start_webrtc(char *url)
 #ifdef WEBRTC_SUPPORT_OPUS
                 .codec = ESP_PEER_AUDIO_CODEC_OPUS,
                 .sample_rate = 16000,
-                .channel = 2,
+                .channel = 1,
 #else
                 .codec = ESP_PEER_AUDIO_CODEC_G711A,
 #endif
@@ -197,18 +204,32 @@ int start_webrtc(char *url)
                 .fps = VIDEO_FPS,
             },
             .audio_dir = ESP_PEER_MEDIA_DIR_SEND_RECV,
-            .video_dir = ESP_PEER_MEDIA_DIR_SEND_ONLY,
+            .video_dir = ESP_PEER_MEDIA_DIR_SEND_RECV,
             .on_custom_data = door_bell_on_cmd,
             .enable_data_channel = DATA_CHANNEL_ENABLED,
-            .no_auto_reconnect = true, // No auto connect peer when signaling connected
+            .no_auto_reconnect =
+#if WEBRTC_USE_LIVEKIT_WHIP
+                false,
+#else
+                true, // No auto connect peer when signaling connected
+#endif
             .extra_cfg = &peer_cfg,
             .extra_size = sizeof(peer_cfg),
         },
         .signaling_cfg = {
             .signal_url = url,
+#if WEBRTC_USE_LIVEKIT_WHIP
+            .extra_cfg = (LIVEKIT_WHIP_BEARER_TOKEN[0] ? &whip_sig_cfg : NULL),
+            .extra_size = (LIVEKIT_WHIP_BEARER_TOKEN[0] ? sizeof(whip_sig_cfg) : 0),
+#endif
         },
         .peer_impl = esp_peer_get_default_impl(),
-        .signaling_impl = esp_signaling_get_apprtc_impl(),
+        .signaling_impl =
+#if WEBRTC_USE_LIVEKIT_WHIP
+            esp_signaling_get_whip_impl(),
+#else
+            esp_signaling_get_apprtc_impl(),
+#endif
     };
     int ret = esp_webrtc_open(&cfg, &webrtc);
     if (ret != 0) {
@@ -217,14 +238,31 @@ int start_webrtc(char *url)
     }
     // Set media provider
     esp_webrtc_media_provider_t media_provider = {};
-    media_sys_get_provider(&media_provider);
-    esp_webrtc_set_media_provider(webrtc, &media_provider);
+    ret = media_sys_get_provider(&media_provider);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Media provider unavailable");
+        esp_webrtc_close(webrtc);
+        webrtc = NULL;
+        return ret;
+    }
+    ret = esp_webrtc_set_media_provider(webrtc, &media_provider);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Fail to bind media provider to WebRTC: %d", ret);
+        esp_webrtc_close(webrtc);
+        webrtc = NULL;
+        return ret;
+    }
 
     // Set event handler
     esp_webrtc_set_event_handler(webrtc, webrtc_event_handler, NULL);
 
+    // WHIP ingest has no "ACCEPT_CALL" step; start peer connection immediately.
+#if WEBRTC_USE_LIVEKIT_WHIP
+    esp_webrtc_enable_peer_connection(webrtc, true);
+#else
     // Default disable auto connect of peer connection
     esp_webrtc_enable_peer_connection(webrtc, false);
+#endif
 
     // Start webrtc
     ret = esp_webrtc_start(webrtc);

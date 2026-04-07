@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Bird Feeder Demo</title>
+  </head>
+  <body>
+    <main class="page">
+      <h1>Smart Bird Feeder Demo</h1>
+
+      <section class="card">
+        <h2>Live View</h2>
+        <div id="live-status" class="status">Not connected</div>
+        <div id="live-video" class="video"></div>
+      </section>
+
+      <section class="card">
+        <h2>Recording</h2>
+        <div id="record-status" class="status">Idle</div>
+        <div class="row">
+          <button id="btn-record-start" type="button">Start recording</button>
+          <button id="btn-record-stop" type="button" disabled>Stop recording</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Photo Capture</h2>
+        <div class="row">
+          <button id="btn-photo" type="button">Capture photo</button>
+        </div>
+        <div id="photo-status" class="status"></div>
+        <div id="photos" class="grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>Recorded Video Playback</h2>
+        <div id="videos" class="stack"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -9,6 +9,8 @@
 
 #include "codec_init.h"
 #include "codec_board.h"
+#include <stdlib.h>
+#include <string.h>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_video_init.h"
 #endif
@@ -25,6 +27,7 @@
 #include "esp_audio_dec_default.h"
 #include "esp_capture_defaults.h"
 #include "esp_capture_sink.h"
+#include "esp_capture_advance.h"
 
 #define TAG "MEDIA_SYS"
 
@@ -37,6 +40,7 @@
 
 typedef struct {
     esp_capture_sink_handle_t   capture_handle;
+    esp_capture_sink_handle_t   photo_sink;
     esp_capture_video_src_if_t *vid_src;
     esp_capture_audio_src_if_t *aud_src;
 } capture_system_t;
@@ -49,6 +53,9 @@ typedef struct {
 
 static capture_system_t capture_sys;
 static player_system_t  player_sys;
+
+// Keep capture pipeline single-sink for WebRTC while debugging no-video issue.
+#define MEDIA_SYS_ENABLE_PHOTO_SINK 0
 
 static bool           music_playing  = false;
 static bool           music_stopping = false;
@@ -143,12 +150,95 @@ static int build_capture_system(void)
 
     // Create capture system
     esp_capture_cfg_t cfg = {
-        .sync_mode = ESP_CAPTURE_SYNC_MODE_AUDIO,
+        .sync_mode = ESP_CAPTURE_SYNC_MODE_SYSTEM,
         .audio_src = capture_sys.aud_src,
         .video_src = capture_sys.vid_src,
     };
-    esp_capture_open(&cfg, &capture_sys.capture_handle);
+    esp_capture_err_t open_ret = esp_capture_open(&cfg, &capture_sys.capture_handle);
+    if (open_ret != ESP_CAPTURE_ERR_OK || capture_sys.capture_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to open capture system (err=%d)", (int)open_ret);
+        return -1;
+    }
+
+#if MEDIA_SYS_ENABLE_PHOTO_SINK
+    // Pre-configure a second sink for one-shot MJPEG photos.
+    // Must be done before capture starts.
+    esp_capture_sink_cfg_t photo_sink_cfg = {
+        .audio_info = {
+            .format_id = ESP_CAPTURE_FMT_ID_G711A,
+            .sample_rate = 8000,
+            .channel = 1,
+            .bits_per_sample = 16,
+        },
+        .video_info = {
+            .format_id = ESP_CAPTURE_FMT_ID_MJPEG,
+            .width = VIDEO_WIDTH,
+            .height = VIDEO_HEIGHT,
+            .fps = VIDEO_FPS,
+        },
+    };
+    esp_capture_err_t err = esp_capture_sink_setup(capture_sys.capture_handle, 1, &photo_sink_cfg, &capture_sys.photo_sink);
+    if (err == ESP_CAPTURE_ERR_OK && capture_sys.photo_sink) {
+        // We only need video frames for photos.
+        esp_capture_sink_disable_stream(capture_sys.photo_sink, ESP_CAPTURE_STREAM_TYPE_AUDIO);
+        ESP_LOGI(TAG, "Photo sink ready (idx=1)");
+    } else {
+        capture_sys.photo_sink = NULL;
+        ESP_LOGW(TAG, "Photo sink disabled (setup err=%d)", (int)err);
+    }
+#else
+    capture_sys.photo_sink = NULL;
+    ESP_LOGW(TAG, "Photo sink disabled (single-sink WebRTC debug mode)");
+#endif
     return 0;
+}
+
+int media_sys_capture_photo_jpeg(uint8_t **out_jpeg, size_t *out_jpeg_len, int timeout_ms)
+{
+    if (!out_jpeg || !out_jpeg_len) {
+        return -1;
+    }
+    *out_jpeg = NULL;
+    *out_jpeg_len = 0;
+
+    if (!capture_sys.photo_sink) {
+        ESP_LOGW(TAG, "Photo sink not available");
+        return -1;
+    }
+
+    if (timeout_ms <= 0) {
+        timeout_ms = 5000;
+    }
+
+    esp_capture_err_t err = esp_capture_sink_enable(capture_sys.photo_sink, ESP_CAPTURE_RUN_MODE_ONESHOT);
+    if (err != ESP_CAPTURE_ERR_OK) {
+        ESP_LOGW(TAG, "Photo sink enable failed: %d", (int)err);
+        return -1;
+    }
+
+    uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    esp_capture_stream_frame_t frame = {
+        .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
+    };
+
+    while ((uint32_t)(esp_timer_get_time() / 1000) - start_ms < (uint32_t)timeout_ms) {
+        err = esp_capture_sink_acquire_frame(capture_sys.photo_sink, &frame, true);
+        if (err == ESP_CAPTURE_ERR_OK && frame.data && frame.size > 0) {
+            uint8_t *jpeg = (uint8_t *)malloc(frame.size);
+            if (!jpeg) {
+                esp_capture_sink_release_frame(capture_sys.photo_sink, &frame);
+                return -1;
+            }
+            memcpy(jpeg, frame.data, frame.size);
+            esp_capture_sink_release_frame(capture_sys.photo_sink, &frame);
+            *out_jpeg = jpeg;
+            *out_jpeg_len = frame.size;
+            return 0;
+        }
+        media_lib_thread_sleep(10);
+    }
+    ESP_LOGW(TAG, "Photo capture timeout");
+    return -1;
 }
 
 static int build_player_system()
@@ -199,14 +289,24 @@ int media_sys_buildup(void)
     esp_video_dec_register_default();
     esp_audio_dec_register_default();
     // Build capture system
-    build_capture_system();
+    if (build_capture_system() != 0) {
+        ESP_LOGE(TAG, "Build capture system failed");
+        return -1;
+    }
     // Build player system
-    build_player_system();
+    if (build_player_system() != 0) {
+        ESP_LOGE(TAG, "Build player system failed");
+        return -1;
+    }
     return 0;
 }
 
 int media_sys_get_provider(esp_webrtc_media_provider_t *provide)
 {
+    if (provide == NULL || capture_sys.capture_handle == NULL) {
+        ESP_LOGE(TAG, "Media provider is not ready");
+        return -1;
+    }
     provide->capture = capture_sys.capture_handle;
     provide->player = player_sys.player;
     return 0;
