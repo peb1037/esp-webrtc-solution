@@ -1,8 +1,10 @@
-# AI usage statement (Lab 6)
+# AI usage statement (Lab 7)
 
 AI tools were used to:
-- Rapidly locate the correct source files responsible for capture (`main/media_sys.c`) and streaming (`main/webrtc.c`, `main/lab6main.c`).
-- Identify the relevant ESP-IDF/Kconfig options for selecting the OV5647 sensor and a MIPI CSI default format.
-- Troubleshoot ESP-IDF flashing/monitoring issues on Windows by identifying and terminating stuck monitor/flash processes holding the serial port.
 
-All changes were reviewed by the developer and validated by rebuilding and flashing the firmware.
+- Identify where LiveKit integration should live (WHIP ingest on-device, token/egress/ingress management in the web backend).
+- Map each required lab feature (live view, recording, photo capture, media listing/playback) to the correct source files in the firmware and the `web_demo` app.
+- Spot reliability issues (e.g., TLS services needing valid device time) and adjust the startup sequencing accordingly.
+- Draft the step-by-step AI-assisted plan and data-flow diagram for the report.
+
+All changes were reviewed by the developer and validated through building/flashing the firmware and exercising the webpage UI against LiveKit + AWS services.

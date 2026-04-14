@@ -1,78 +1,81 @@
-# AI-assisted development plan (Lab 6)
+# AI-assisted development plan (Lab 7)
 
-## Stop point (2026-04-07 night)
-- Goal status: signaling/connection succeeds, but browser still shows no video.
-- Most likely current blocker: build system dependency state after local `esp_peer` replacement to 1.4.0.
-- Last known failing symptoms during build regenerate:
-   - repeated CMake re-run loops
-   - missing `build/managed_components_list.temp.cmake`
-   - component manager traceback ending in `KeyError: ComponentName(idf, espressif__eppp_link)`
-- Important context:
-   - `components/esp_peer` was replaced with 1.4.0 content.
-   - backup component was moved out of `components` to `_component_backups/esp_peer_1_3_4`.
-   - multiple runtime debug edits are present in `main` and `components/esp_webrtc`.
+## Goal
+Deploy and demo a cloud-enabled “smart bird feeder” media pipeline:
 
-### First actions to resume tomorrow
-1. Reset generated dependency/build state only (do not revert source edits).
-2. Run one clean configure/build and confirm CMake loop is gone.
-3. Flash and validate if video egress bitrate becomes non-zero.
-
-### Suggested command sequence (from `solutions/doorbell_demo`)
-```powershell
-Remove-Item -Recurse -Force build, managed_components -ErrorAction SilentlyContinue
-Remove-Item -Force dependencies.lock -ErrorAction SilentlyContinue
-idf.py reconfigure
-idf.py build
-```
-
-### Validation checks after successful build+flash
-- Device log no longer shows invalid mids (audio/video mid should not be 255).
-- Backend ingress list shows non-zero video bitrate and non-zero dimensions.
-- Browser live video element advances with non-zero width/height.
+- Live viewing of ESP32-P4 A/V on a webpage via LiveKit (WebRTC)
+- Recording start/stop via LiveKit egress writing MP4 to AWS S3
+- Photo capture triggered from webpage via MQTT (AWS IoT Core) and uploaded to S3 via presigned PUT
+- Preview photos + playback recorded videos from S3 on the webpage
 
 ## Step-by-step plan
-1. Confirm target + peripherals
-   - Target: ESP32-P4
-   - Camera: OV5647 (MIPI CSI)
-   - Audio codec: ES8311
-2. Validate the capture pipeline in the project
-   - Camera is initialized via `esp_video_init()` (CSI/DVP selection)
-   - Frames are produced via `esp_capture` video source and audio device source
-3. Validate the WebRTC pipeline
-   - WebRTC signaling joins a room on the Espressif demo server
-   - Media provider is set to the capture handle so encoded media is sent to the peer
-4. Configure sensor/codec in Kconfig
-   - Select OV5647 and a suitable MIPI output format
-   - Ensure ISP pipeline support is enabled
-   - Ensure ES8311 codec support is enabled
-5. Build → flash → monitor
-   - Build the project
-   - Flash the image to the board
-   - Confirm boot logs show successful Wi‑Fi + room join
-6. Verify in browser
-   - Open the DoorBell web page on the signaling server
-   - Join the room printed by the board
-   - Confirm live video and audio playback
+1. Configure LiveKit (live view + egress recording)
+   - Create a LiveKit Cloud project.
+   - Set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and `LIVEKIT_ROOM` in `web_demo/.env`.
+   - Use the web backend to create/reuse a WHIP ingress and obtain the `whipEndpoint` for the device.
+
+2. Configure AWS (S3 + IoT Core MQTT)
+   - Create an S3 bucket and pick prefixes (photos/recordings).
+   - In AWS IoT Core: create a Thing/certificates + attach policy that allows connect/subscribe/publish.
+   - In `main/settings.h`, set `AWS_IOT_ENDPOINT` and ensure `AWS_IOT_TOPIC_CMD` matches the web backend.
+   - Paste the IoT client certificate + private key into `main/aws_iot_client_cert.pem` and `main/aws_iot_client_key.pem`.
+
+3. Configure firmware (ESP32-P4)
+   - Set `WIFI_SSID` / `WIFI_PASSWORD` in `main/settings.h` (or use `wifi` CLI).
+   - Set `WEBRTC_USE_LIVEKIT_WHIP=1` and set `LIVEKIT_WHIP_URL` to the `whipEndpoint` (includes stream key).
+   - Build/flash; validate boot logs show Wi‑Fi connected + MQTT started + WHIP ingest started.
+
+4. Run the webpage UI + backend
+   - In `web_demo/`, run `npm run dev`.
+   - Open the UI at `http://localhost:5173`.
+   - Confirm “Live” connects and shows inbound video dimensions and bitrate.
+
+5. Demo required functions end-to-end
+   - Live view: verify audio/video plays.
+   - Recording: click start/stop; confirm an MP4 appears in the S3 recordings prefix and in the “Videos” list.
+   - Photo capture: click capture; confirm a JPEG appears in the S3 photos prefix and in the “Photos” list.
+
+## Validation checklist
+- Device:
+  - Wi‑Fi connects reliably; system time is set (SNTP) before TLS services.
+  - AWS IoT MQTT shows CONNECTED and receives JSON commands.
+  - WHIP ingest starts and stays connected.
+- Web:
+  - Live view subscribes to at least one remote video track and shows non-zero `vw`/`vh`.
+  - Recording start/stop returns `egressId` and an MP4 shows up in S3.
+  - Photo capture publishes MQTT command; device uploads; photo is visible in S3 and UI.
 
 ## Flowchart (components + data flow)
 ```mermaid
 flowchart LR
-  CAM[OV5647 Camera\nMIPI CSI-2] --> CSI[ESP32-P4 CSI Receiver]
-  CSI --> ISP[ISP Pipeline]
-  ISP --> V4L2[/dev/video0\nV4L2 Device]
-  V4L2 --> CAPV[esp_capture\nVideo Source]
+  USER[Browser UI\nweb_demo (Vite)] -->|HTTP| WEB[Local backend\nExpress server.js]
 
-  MIC[Mic / Line-In] --> ES8311[ES8311 Codec]
-  ES8311 --> CAPA[esp_capture\nAudio Device Source]
+  subgraph LiveKit[LiveKit Cloud]
+    LK_ROOM[Room\nLive viewing] 
+    LK_ING[WHIP Ingress\n(H.264 + Opus)]
+    LK_EGR[Egress\nRoomComposite MP4]
+  end
 
-  CAPV --> CAP[esp_capture\nCapture Handle]
-  CAPA --> CAP
+  subgraph AWS[AWS]
+    IOT[AWS IoT Core\nMQTT Broker]
+    S3[S3 Bucket\nphotos/ + recordings/]
+  end
 
-  CAP --> WEBRTC[esp_webrtc + esp_peer\nH.264 video + audio]
-  WEBRTC --> NET[Wi‑Fi]
-  NET --> SIG[Signaling Server\nwebrtc.espressif.com]
-  NET --> BROWSER[Browser\nDoorBell Demo UI]
+  DEV[ESP32-P4 Firmware\nDoorbell/Birdfeeder demo] -->|WHIP publish\nA/V| LK_ING
+  LK_ING --> LK_ROOM
+  USER -->|LiveKit token| WEB
+  WEB -->|JWT token| USER
+  USER -->|subscribe| LK_ROOM
 
-  SIG -. room join / signaling .- WEBRTC
-  WEBRTC -. RTP/RTCP media .- BROWSER
+  USER -->|Start/Stop recording| WEB
+  WEB -->|Egress start/stop| LK_EGR
+  LK_EGR -->|MP4 upload| S3
+
+  USER -->|Capture photo| WEB
+  WEB -->|presigned PUT url| DEV
+  WEB -->|MQTT cmd JSON| IOT
+  DEV -->|subscribe cmd| IOT
+  DEV -->|HTTP PUT JPEG| S3
+  WEB -->|list + signed GET| S3
+  WEB -->|photo/video URLs| USER
 ```

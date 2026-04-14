@@ -368,32 +368,43 @@ static char* gen_room_id_use_mac(void)
 
 static int network_event_handler(bool connected)
 {
-    cloud_ctrl_on_network(connected);
     if (connected) {
         // Enter into Room directly
         RUN_ASYNC(start, {
             ensure_time_is_set();
+            // AWS IoT uses TLS; ensure time is valid before connecting.
+            // Run this inside the async thread so the network event handler stays snappy.
+            if (network_is_connected()) {
+                cloud_ctrl_on_network(true);
+            }
 #if WEBRTC_USE_LIVEKIT_WHIP
             if (LIVEKIT_WHIP_URL[0] == 0) {
                 ESP_LOGE(TAG, "LIVEKIT_WHIP_URL is empty (see settings.h)");
             } else {
                 ESP_LOGI(TAG, "Starting WHIP ingest: %s", LIVEKIT_WHIP_URL);
-                int r = start_webrtc((char *)LIVEKIT_WHIP_URL);
-                ESP_LOGI(TAG, "WHIP start_webrtc() returned: %d", r);
+                if (network_is_connected()) {
+                    int r = start_webrtc((char *)LIVEKIT_WHIP_URL);
+                    ESP_LOGI(TAG, "WHIP start_webrtc() returned: %d", r);
+                } else {
+                    ESP_LOGW(TAG, "Network disconnected before WHIP start");
+                }
             }
 #else
             char *room = gen_room_id_use_mac();
             snprintf(room_url, sizeof(room_url), "%s/join/%s", server_url, room);
             ESP_LOGI(TAG, "Start to join in room %s", room);
-            if (start_webrtc(room_url) == 0) {
-                log_room_hint(room);
-            } else {
-                ESP_LOGE(TAG, "Failed to start WebRTC, but room is still %s", room);
-                log_room_hint(room);
+            if (network_is_connected()) {
+                if (start_webrtc(room_url) == 0) {
+                    log_room_hint(room);
+                } else {
+                    ESP_LOGE(TAG, "Failed to start WebRTC, but room is still %s", room);
+                    log_room_hint(room);
+                }
             }
 #endif
         });
     } else {
+        cloud_ctrl_on_network(false);
         stop_webrtc();
     }
     return 0;

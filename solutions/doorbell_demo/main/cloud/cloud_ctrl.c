@@ -11,6 +11,7 @@
 #include "cloud/http_upload.h"
 #include "media_sys.h"
 #include "settings.h"
+#include "common.h"
 
 static const char *TAG = "CLOUD_CTRL";
 
@@ -70,6 +71,41 @@ static void handle_photo_cmd(cJSON *root)
     }
 }
 
+static void handle_video_control_cmd(bool start)
+{
+    if (start) {
+#if WEBRTC_USE_LIVEKIT_WHIP
+        if (!network_is_connected()) {
+            publish_evt("video_ack", "\"state\":\"error\",\"reason\":\"network_disconnected\"");
+            return;
+        }
+        if (LIVEKIT_WHIP_URL[0] == 0) {
+            publish_evt("video_ack", "\"state\":\"error\",\"reason\":\"empty_whip_url\"");
+            return;
+        }
+        int ret = start_webrtc((char *)LIVEKIT_WHIP_URL);
+        if (ret == 0) {
+            publish_evt("video_ack", "\"state\":\"started\"");
+        } else {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "\"state\":\"error\",\"reason\":\"start_failed\",\"code\":%d", ret);
+            publish_evt("video_ack", detail);
+        }
+#else
+        publish_evt("video_ack", "\"state\":\"error\",\"reason\":\"unsupported_without_whip\"");
+#endif
+    } else {
+        int ret = stop_webrtc();
+        if (ret == 0) {
+            publish_evt("video_ack", "\"state\":\"stopped\"");
+        } else {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "\"state\":\"error\",\"reason\":\"stop_failed\",\"code\":%d", ret);
+            publish_evt("video_ack", detail);
+        }
+    }
+}
+
 static void on_mqtt_msg(const char *topic, int topic_len, const char *data, int data_len, void *ctx)
 {
     (void)ctx;
@@ -103,6 +139,10 @@ static void on_mqtt_msg(const char *topic, int topic_len, const char *data, int 
         handle_photo_cmd(root);
     } else if (strcmp(cmd->valuestring, "ping") == 0) {
         publish_evt("pong", NULL);
+    } else if (strcmp(cmd->valuestring, "video_start") == 0) {
+        handle_video_control_cmd(true);
+    } else if (strcmp(cmd->valuestring, "video_stop") == 0) {
+        handle_video_control_cmd(false);
     } else if (strcmp(cmd->valuestring, "record_start") == 0) {
         // Recording is typically implemented as LiveKit egress (cloud-side), but we ack here.
         publish_evt("record_ack", "\"state\":\"started\"");

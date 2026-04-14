@@ -1,16 +1,16 @@
-# AI Q&A summary (Lab 6)
+# AI Q&A summary (Lab 7)
 
-- Q: Where is video/audio capture implemented?
-  - A: The capture system is built in `main/media_sys.c` using `esp_capture` video + audio sources.
+- Q: How does the device stream live A/V to a webpage using LiveKit?
+  - A: The ESP32 publishes A/V to a LiveKit WHIP ingress (`LIVEKIT_WHIP_URL`) in `main/webrtc.c`; the webpage uses `/api/livekit/token` (backend) and `livekit-client` (frontend) to subscribe to the LiveKit room.
 
-- Q: Where is WebRTC started and how does the board join a room?
-  - A: Room join logic is in `main/lab6main.c` (auto-join on network connect) and `main/webrtc.c` (`start_webrtc()` opens signaling and starts WebRTC).
+- Q: Where does the WHIP URL come from and how is it used?
+  - A: The web backend exposes `GET /api/livekit/ingress` (in `web_demo/server.js`) which creates/reuses a WHIP ingress and returns `whipEndpoint` (includes stream key). That value is copied into `LIVEKIT_WHIP_URL` in `main/settings.h`.
 
-- Q: How does media reach the browser?
-  - A: `main/webrtc.c` sets an `esp_webrtc_media_provider_t` from `media_sys_get_provider()`, which connects the capture handle to the WebRTC peer connection.
+- Q: How is recording implemented and why doesn’t the device “record” locally?
+  - A: Recording is done cloud-side using LiveKit egress (`/api/record/start` and `/api/record/stop` in `web_demo/server.js`) which writes MP4 to S3; the device just streams live.
 
-- Q: What camera interface is used for OV5647 on ESP32-P4?
-  - A: MIPI CSI is used; camera init is performed via `esp_video_init()` path in `main/media_sys.c`.
+- Q: How does photo capture work end-to-end?
+  - A: The webpage calls `POST /api/photo` which creates a presigned S3 PUT URL and publishes an MQTT JSON command to AWS IoT Core. The device receives the MQTT command (in `main/cloud/cloud_ctrl.c`), captures a JPEG (`media_sys_capture_photo_jpeg`) and uploads it via HTTP PUT to the presigned URL.
 
-- Q: What configuration changes are needed to meet the OV5647 requirement?
-  - A: Enable `CONFIG_CAMERA_OV5647` and select an OV5647 MIPI default format (e.g., RAW10 1920x1080) while disabling other sensor selections.
+- Q: What’s required for AWS IoT Core to connect reliably from the ESP32?
+  - A: Configure the ATS endpoint in `main/settings.h`, and paste the client certificate + private key into `main/aws_iot_client_cert.pem` and `main/aws_iot_client_key.pem`. Also ensure the device clock is set (SNTP) before starting TLS connections.

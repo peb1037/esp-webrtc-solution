@@ -26,10 +26,15 @@ async function fetchJson(url, options) {
 const liveStatus = $('live-status');
 const recordStatus = $('record-status');
 const photoStatus = $('photo-status');
+const deviceCmdStatus = $('device-cmd-status');
+const videoControlStatus = $('video-control-status');
 
 const btnRecordStart = $('btn-record-start');
 const btnRecordStop = $('btn-record-stop');
 const btnPhoto = $('btn-photo');
+const btnPingDevice = $('btn-device-ping');
+const btnVideoStart = $('btn-video-start');
+const btnVideoStop = $('btn-video-stop');
 
 const liveVideo = $('live-video');
 const photos = $('photos');
@@ -37,6 +42,7 @@ const videos = $('videos');
 
 let room = null;
 let activeEgressId = null;
+let videoStreamRequested = false;
 
 let subscribed = {
   video: 0,
@@ -134,6 +140,22 @@ function clearNode(node) {
 function setRecordingUi(recording) {
   btnRecordStart.disabled = recording;
   btnRecordStop.disabled = !recording;
+}
+
+function setVideoControlUi({ running, pending }) {
+  btnVideoStart.disabled = pending || running;
+  btnVideoStop.disabled = pending || !running;
+}
+
+async function sendDeviceCommand(path, body = {}) {
+  return fetchJson(path, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+function nowLabel() {
+  return new Date().toLocaleTimeString();
 }
 
 async function connectLive() {
@@ -383,11 +405,59 @@ async function stopRecording() {
   }
 }
 
+async function pingDevice() {
+  btnPingDevice.disabled = true;
+  setStatus(deviceCmdStatus, 'Sending ping command…');
+
+  try {
+    await sendDeviceCommand('/api/device/ping');
+    setStatus(deviceCmdStatus, `Ping command sent at ${nowLabel()}`);
+  } catch (err) {
+    setStatus(deviceCmdStatus, `Error: ${err?.message ?? String(err)}`);
+  } finally {
+    btnPingDevice.disabled = false;
+  }
+}
+
+async function requestVideoStart() {
+  setVideoControlUi({ running: videoStreamRequested, pending: true });
+  setStatus(videoControlStatus, 'Sending start-video command…');
+
+  try {
+    await sendDeviceCommand('/api/device/video/start');
+    videoStreamRequested = true;
+    setStatus(videoControlStatus, `Start command sent at ${nowLabel()}`);
+  } catch (err) {
+    setStatus(videoControlStatus, `Error: ${err?.message ?? String(err)}`);
+  } finally {
+    setVideoControlUi({ running: videoStreamRequested, pending: false });
+  }
+}
+
+async function requestVideoStop() {
+  setVideoControlUi({ running: videoStreamRequested, pending: true });
+  setStatus(videoControlStatus, 'Sending stop-video command…');
+
+  try {
+    await sendDeviceCommand('/api/device/video/stop');
+    videoStreamRequested = false;
+    setStatus(videoControlStatus, `Stop command sent at ${nowLabel()}`);
+  } catch (err) {
+    setStatus(videoControlStatus, `Error: ${err?.message ?? String(err)}`);
+  } finally {
+    setVideoControlUi({ running: videoStreamRequested, pending: false });
+  }
+}
+
 btnPhoto.addEventListener('click', capturePhoto);
 btnRecordStart.addEventListener('click', startRecording);
 btnRecordStop.addEventListener('click', stopRecording);
+btnPingDevice.addEventListener('click', pingDevice);
+btnVideoStart.addEventListener('click', requestVideoStart);
+btnVideoStop.addEventListener('click', requestVideoStop);
 
 setRecordingUi(false);
+setVideoControlUi({ running: videoStreamRequested, pending: false });
 
 connectLive();
 refreshPhotos();

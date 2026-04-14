@@ -118,6 +118,23 @@ function makeIotClient() {
   });
 }
 
+async function publishDeviceCommand(cmd, fields = {}) {
+  requireIoT();
+
+  const iot = makeIotClient();
+  const payload = JSON.stringify({ cmd, ...fields });
+
+  await iot.send(
+    new PublishCommand({
+      topic: AWS_IOT_TOPIC_CMD,
+      qos: 1,
+      payload: new TextEncoder().encode(payload),
+    }),
+  );
+
+  return payload;
+}
+
 let activeEgressId = null;
 
 app.get('/api/health', (req, res) => {
@@ -276,10 +293,36 @@ app.get('/api/livekit/room', async (req, res) => {
   }
 });
 
+app.post('/api/device/ping', async (req, res) => {
+  try {
+    await publishDeviceCommand('ping');
+    okJson(res, { ok: true, command: 'ping' });
+  } catch (err) {
+    errorJson(res, 500, err?.message ?? String(err));
+  }
+});
+
+app.post('/api/device/video/start', async (req, res) => {
+  try {
+    await publishDeviceCommand('video_start');
+    okJson(res, { ok: true, command: 'video_start' });
+  } catch (err) {
+    errorJson(res, 500, err?.message ?? String(err));
+  }
+});
+
+app.post('/api/device/video/stop', async (req, res) => {
+  try {
+    await publishDeviceCommand('video_stop');
+    okJson(res, { ok: true, command: 'video_stop' });
+  } catch (err) {
+    errorJson(res, 500, err?.message ?? String(err));
+  }
+});
+
 app.post('/api/photo', async (req, res) => {
   try {
     requireAwsBasics();
-    requireIoT();
 
     const key = `${S3_PHOTOS_PREFIX}${nowIsoCompact()}-${crypto.randomBytes(4).toString('hex')}.jpg`;
     const contentType = 'image/jpeg';
@@ -295,20 +338,11 @@ app.post('/api/photo', async (req, res) => {
     const getCmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
     const publicUrl = await getSignedUrl(s3Client, getCmd, { expiresIn: 60 * 60 });
 
-    const iot = makeIotClient();
-    const payload = JSON.stringify({
-      cmd: 'photo',
+    await publishDeviceCommand('photo', {
       upload_url: uploadUrl,
       content_type: contentType,
       public_url: publicUrl,
     });
-    await iot.send(
-      new PublishCommand({
-        topic: AWS_IOT_TOPIC_CMD,
-        qos: 1,
-        payload: new TextEncoder().encode(payload),
-      }),
-    );
 
     okJson(res, { ok: true, key, publicUrl });
   } catch (err) {
