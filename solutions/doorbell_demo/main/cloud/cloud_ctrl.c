@@ -7,6 +7,8 @@
 #include "esp_log.h"
 #include "cJSON.h"
 
+#include "media_lib_os.h"
+
 #include "cloud/aws_iot.h"
 #include "cloud/http_upload.h"
 #include "media_sys.h"
@@ -14,6 +16,11 @@
 #include "common.h"
 
 static const char *TAG = "CLOUD_CTRL";
+
+#define VIDEO_START_MAX_ATTEMPTS      2
+#define VIDEO_START_RETRY_DELAY_MS    1200
+#define AWS_IOT_START_MAX_ATTEMPTS    3
+#define AWS_IOT_START_RETRY_DELAY_MS  1500
 
 static void publish_evt(const char *evt, const char *detail_json)
 {
@@ -27,7 +34,27 @@ static void publish_evt(const char *evt, const char *detail_json)
     } else {
         snprintf(payload, sizeof(payload), "{\"evt\":\"%s\"}", evt);
     }
-    aws_iot_publish(AWS_IOT_TOPIC_EVT, payload, 0, 1, 0);
+    int msg_id = aws_iot_publish(AWS_IOT_TOPIC_EVT, payload, 0, 1, 0);
+    if (msg_id < 0) {
+        ESP_LOGW(TAG, "Event publish failed evt=%s connected=%d", evt, aws_iot_is_connected());
+    }
+}
+
+static int start_livekit_with_retry(const char *whip_url)
+{
+    int ret = -1;
+    for (int attempt = 1; attempt <= VIDEO_START_MAX_ATTEMPTS; attempt++) {
+        ret = start_webrtc((char *)whip_url);
+        if (ret == 0) {
+            return 0;
+        }
+        ESP_LOGW(TAG, "start_webrtc failed attempt %d/%d ret=%d",
+                 attempt, VIDEO_START_MAX_ATTEMPTS, ret);
+        if (attempt < VIDEO_START_MAX_ATTEMPTS && network_is_connected()) {
+            media_lib_thread_sleep(VIDEO_START_RETRY_DELAY_MS * attempt);
+        }
+    }
+    return ret;
 }
 
 static void handle_photo_cmd(cJSON *root)
@@ -83,7 +110,11 @@ static void handle_video_control_cmd(bool start)
             publish_evt("video_ack", "\"state\":\"error\",\"reason\":\"empty_whip_url\"");
             return;
         }
-        int ret = start_webrtc((char *)LIVEKIT_WHIP_URL);
+        if (is_webrtc_active()) {
+            publish_evt("video_ack", "\"state\":\"already_started\"");
+            return;
+        }
+        int ret = start_livekit_with_retry(LIVEKIT_WHIP_URL);
         if (ret == 0) {
             publish_evt("video_ack", "\"state\":\"started\"");
         } else {
@@ -95,6 +126,10 @@ static void handle_video_control_cmd(bool start)
         publish_evt("video_ack", "\"state\":\"error\",\"reason\":\"unsupported_without_whip\"");
 #endif
     } else {
+        if (!is_webrtc_active()) {
+            publish_evt("video_ack", "\"state\":\"already_stopped\"");
+            return;
+        }
         int ret = stop_webrtc();
         if (ret == 0) {
             publish_evt("video_ack", "\"state\":\"stopped\"");
@@ -162,7 +197,19 @@ int cloud_ctrl_init(void)
 void cloud_ctrl_on_network(bool connected)
 {
     if (connected) {
-        aws_iot_start();
+        int ret = -1;
+        for (int attempt = 1; attempt <= AWS_IOT_START_MAX_ATTEMPTS; attempt++) {
+            ret = aws_iot_start();
+            if (ret == 0) {
+                return;
+            }
+            ESP_LOGW(TAG, "aws_iot_start failed attempt %d/%d ret=%d",
+                     attempt, AWS_IOT_START_MAX_ATTEMPTS, ret);
+            if (attempt < AWS_IOT_START_MAX_ATTEMPTS && network_is_connected()) {
+                media_lib_thread_sleep(AWS_IOT_START_RETRY_DELAY_MS * attempt);
+            }
+        }
+        ESP_LOGE(TAG, "AWS IoT failed to start after %d attempts", AWS_IOT_START_MAX_ATTEMPTS);
     } else {
         aws_iot_stop();
     }

@@ -43,7 +43,7 @@ extern "C" {
  *
  * Example: "xxxxxxxxxxxxx-ats.iot.us-east-1.amazonaws.com"
  */
-#define AWS_IOT_ENDPOINT "xxxx-ats.iot.<region>.amazonaws.com"
+#define AWS_IOT_ENDPOINT "ai9n23epuqspd-ats.iot.us-east-1.amazonaws.com"
 
 /**
  * @brief  AWS IoT MQTT client id (optional)

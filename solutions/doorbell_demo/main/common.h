@@ -52,6 +52,15 @@ int set_webrtc_bitrate(bool audio, int bitrate);
 void query_webrtc(void);
 
 /**
+ * @brief  Check whether WebRTC handle is active
+ *
+ * @return
+ *      - true   WebRTC session is open (starting/started)
+ *      - false  WebRTC session is closed
+ */
+bool is_webrtc_active(void);
+
+/**
  * @brief  Stop WebRTC
  *
  * @return

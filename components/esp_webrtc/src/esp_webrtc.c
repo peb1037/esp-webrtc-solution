@@ -126,27 +126,36 @@ static void _media_send(void *ctx)
         esp_capture_stream_frame_t audio_frame = {
             .stream_type = ESP_CAPTURE_STREAM_TYPE_AUDIO,
         };
-        // Get and send all audio frame without wait
-        while (esp_capture_sink_acquire_frame(rtc->capture_path, &audio_frame, true) == ESP_CAPTURE_ERR_OK) {
+        // Drain a bounded batch of queued audio frames without blocking.
+        int audio_batch = 0;
+        while (audio_batch < 4 &&
+               esp_capture_sink_acquire_frame(rtc->capture_path, &audio_frame, true) == ESP_CAPTURE_ERR_OK) {
             esp_peer_audio_frame_t audio_send_frame = {
                 .pts = audio_frame.pts,
                 .data = audio_frame.data,
                 .size = audio_frame.size,
             };
-            esp_peer_send_audio(rtc->pc, &audio_send_frame);
+            int a_send_ret = esp_peer_send_audio(rtc->pc, &audio_send_frame);
             esp_capture_sink_release_frame(rtc->capture_path, &audio_frame);
             rtc->aud_send_pts = audio_frame.pts;
             rtc->aud_send_num++;
             rtc->aud_send_size += audio_frame.size;
+            if ((rtc->aud_send_num % 100) == 1) {
+                ESP_LOGI(TAG, "Audio send pts=%u size=%d ret=%d sent=%u",
+                         (unsigned)audio_send_frame.pts, audio_send_frame.size, a_send_ret,
+                         (unsigned)rtc->aud_send_num);
+            }
             if (webrtc_tracing) {
                 printf("A\n");
             }
+            audio_batch++;
         }
     }
     if (rtc->rtc_cfg.peer_cfg.video_info.codec) {
         esp_capture_stream_frame_t video_frame = {
             .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
         };
+        // Wait for a video frame to keep steady upload cadence.
         int ret = esp_capture_sink_acquire_frame(rtc->capture_path, &video_frame, false);
         if (ret == ESP_CAPTURE_ERR_OK) {
             if (rtc->rtc_cfg.peer_cfg.enable_data_channel && rtc->rtc_cfg.peer_cfg.video_over_data_channel) {
@@ -179,6 +188,10 @@ static void _media_send(void *ctx)
                                      send_ret, (unsigned)rtc->vid_send_fail_num,
                                      video_send_frame.size, (unsigned)video_send_frame.pts);
                         }
+                    } else if ((rtc->vid_send_num % 50) == 1) {
+                        ESP_LOGI(TAG, "Video send pts=%u size=%d sent=%u",
+                                 (unsigned)video_send_frame.pts, video_send_frame.size,
+                                 (unsigned)rtc->vid_send_num);
                     }
                 }
             }
@@ -204,10 +217,13 @@ static void _media_send(void *ctx)
 void media_send_task(void *arg)
 {
     webrtc_t *rtc = (webrtc_t *)arg;
+    ESP_LOGI(TAG, "media_send_task started (audio_codec=%d video_codec=%d)",
+             rtc->rtc_cfg.peer_cfg.audio_info.codec, rtc->rtc_cfg.peer_cfg.video_info.codec);
     while (rtc->send_going) {
         _media_send(arg);
         media_lib_thread_sleep(AUDIO_FRAME_INTERVAL);
     }
+    ESP_LOGI(TAG, "media_send_task exiting");
     SET_WAIT_BITS(PC_SEND_QUIT_BIT);
     media_lib_thread_destroy(NULL);
 }
@@ -215,9 +231,15 @@ void media_send_task(void *arg)
 static int start_stream(webrtc_t *rtc)
 {
     if (rtc->send_going) {
+        ESP_LOGI(TAG, "start_stream skipped: sender already running");
         return ESP_CAPTURE_ERR_OK;
     }
+    if (rtc->capture_path == NULL) {
+        ESP_LOGE(TAG, "start_stream failed: capture sink not configured");
+        return ESP_CAPTURE_ERR_INVALID_STATE;
+    }
     int ret = esp_capture_start(rtc->media_provider.capture);
+    ESP_LOGI(TAG, "esp_capture_start ret=%d", ret);
     if (ret == ESP_CAPTURE_ERR_OK || ret == ESP_CAPTURE_ERR_INVALID_STATE) {
         if (ret == ESP_CAPTURE_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "Capture already started, continue with sender task");
@@ -227,6 +249,9 @@ static int start_stream(webrtc_t *rtc)
         ret = media_lib_thread_create_from_scheduler(&handle, "pc_send", media_send_task, rtc);
         if (ret != 0) {
             rtc->send_going = false;
+            ESP_LOGE(TAG, "Failed to create media_send_task ret=%d", ret);
+        } else {
+            ESP_LOGI(TAG, "media_send_task created");
         }
     } else {
         ESP_LOGE(TAG, "Fail to start capture ret:%d", ret);
@@ -349,7 +374,9 @@ static int pc_on_video_info(esp_peer_video_stream_info_t *info, void *ctx)
     webrtc_t *rtc = (webrtc_t *)ctx;
     av_render_video_info_t video_info = {};
     convert_dec_vid_info(info, &video_info);
-    av_render_add_video_stream(rtc->play_handle, &video_info);
+    if (rtc->play_handle) {
+        av_render_add_video_stream(rtc->play_handle, &video_info);
+    }
     rtc->recv_vid_info.codec = info->codec;
     return 0;
 }
@@ -386,8 +413,10 @@ static int pc_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx)
     rtc->recv_aud_info = *info;
     av_render_audio_info_t audio_info = {};
     convert_dec_aud_info(info, &audio_info);
-    printf("Add audio codec %d sample_rate %d\n", audio_info.codec, (int)audio_info.sample_rate);
-    av_render_add_audio_stream(rtc->play_handle, &audio_info);
+    if (rtc->play_handle) {
+        printf("Add audio codec %d sample_rate %d\n", audio_info.codec, (int)audio_info.sample_rate);
+        av_render_add_audio_stream(rtc->play_handle, &audio_info);
+    }
     rtc->recv_aud_info.codec = info->codec;
     return 0;
 }
@@ -395,7 +424,7 @@ static int pc_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx)
 static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx)
 {
     webrtc_t *rtc = (webrtc_t *)ctx;
-    if (rtc->running == false || rtc->recv_aud_info.codec == ESP_PEER_AUDIO_CODEC_NONE) {
+    if (rtc->running == false || rtc->recv_aud_info.codec == ESP_PEER_AUDIO_CODEC_NONE || rtc->play_handle == NULL) {
         return 0;
     }
     rtc->aud_recv_pts = info->pts;
@@ -413,7 +442,7 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx)
 static int pc_on_video_data(esp_peer_video_frame_t *info, void *ctx)
 {
     webrtc_t *rtc = (webrtc_t *)ctx;
-    if (rtc->running == false) {
+    if (rtc->running == false || rtc->play_handle == NULL) {
         return 0;
     }
     rtc->vid_recv_num++;
@@ -444,6 +473,9 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx)
     rtc->vid_recv_num++;
     rtc->vid_recv_size += frame->size;
     // Treat received data as video data
+    if (rtc->play_handle == NULL) {
+        return 0;
+    }
     if (rtc->recv_vid_info.codec == ESP_PEER_VIDEO_CODEC_NONE) {
         rtc->recv_vid_info.codec = rtc->rtc_cfg.peer_cfg.video_info.codec;
         av_render_video_info_t video_info = {};
@@ -660,9 +692,29 @@ static int pc_start(webrtc_t *rtc, esp_peer_ice_server_cfg_t *server_info, int s
     if (peer_cfg.video_dir == ESP_PEER_MEDIA_DIR_RECV_ONLY) {
         sink_cfg.video_info.format_id = ESP_CAPTURE_FMT_ID_NONE;
     }
-    esp_capture_sink_setup(rtc->media_provider.capture, 0, &sink_cfg, &rtc->capture_path);
+    esp_capture_err_t sink_ret = esp_capture_sink_setup(rtc->media_provider.capture, 0, &sink_cfg, &rtc->capture_path);
+    if (sink_ret != ESP_CAPTURE_ERR_OK || rtc->capture_path == NULL) {
+        ESP_LOGE(TAG, "Capture sink setup failed ret=%d aud_fmt=%d vid_fmt=%d %dx%d@%d",
+                 sink_ret,
+                 sink_cfg.audio_info.format_id,
+                 sink_cfg.video_info.format_id,
+                 sink_cfg.video_info.width,
+                 sink_cfg.video_info.height,
+                 sink_cfg.video_info.fps);
+        return sink_ret != ESP_CAPTURE_ERR_OK ? sink_ret : ESP_PEER_ERR_FAIL;
+    }
+    ESP_LOGI(TAG, "Capture sink ready aud_fmt=%d vid_fmt=%d %dx%d@%d",
+             sink_cfg.audio_info.format_id,
+             sink_cfg.video_info.format_id,
+             sink_cfg.video_info.width,
+             sink_cfg.video_info.height,
+             sink_cfg.video_info.fps);
     pc_apply_capture_pre_setting(rtc, WEBRTC_PRE_SETTING_MASK_ALL);
-    esp_capture_sink_enable(rtc->capture_path, ESP_CAPTURE_RUN_MODE_ALWAYS);
+    esp_capture_err_t enable_ret = esp_capture_sink_enable(rtc->capture_path, ESP_CAPTURE_RUN_MODE_ALWAYS);
+    if (enable_ret != ESP_CAPTURE_ERR_OK) {
+        ESP_LOGE(TAG, "Capture sink enable failed ret=%d", enable_ret);
+        return enable_ret;
+    }
     return ret;
 }
 
@@ -850,6 +902,8 @@ static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
                 char *patched = calloc(1, patched_cap);
                 int patched_len = 0;
                 int injected_mid = 0;
+                int rewritten_recvonly = 0;
+                int dropped_mid_lines = 0;
                 int dedup_lines = 0;
                 int section_idx = -1;
                 bool section_has_mid = false;
@@ -868,8 +922,11 @@ static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
                             char line_buf[256] = {0};
                             const char *emit_line = line;
                             int emit_len = line_len;
+                            bool is_mline = false;
+                            bool skip_line = false;
 
                             if (line_len >= 2 && line[0] == 'm' && line[1] == '=') {
+                                is_mline = true;
                                 section_idx++;
                                 section_has_mid = false;
                                 int rebuilt_len = dedupe_mline_payloads(line, line_len, line_buf, sizeof(line_buf));
@@ -880,19 +937,43 @@ static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
                             }
 
                             if (line_len >= 6 && memcmp(line, "a=mid:", 6) == 0) {
-                                section_has_mid = true;
+                                // Drop existing mid lines and inject deterministic mids right after m=.
+                                // This helps older parser implementations reliably map media sections.
+                                skip_line = true;
+                                dropped_mid_lines++;
                             }
 
-                            if (emit_len == prev_line_len && emit_len > 0 && memcmp(emit_line, prev_line, emit_len) == 0) {
-                                dedup_lines++;
-                            } else {
-                                if (copy_sdp_line(patched, patched_cap, &patched_len, emit_line, emit_len) != 0) {
-                                    break;
+                            // WHIP answers from ingest are typically recvonly.
+                            // Some peer parser versions fail to map mids in this case,
+                            // so normalize to sendrecv for internal negotiation only.
+                            if (line_len >= 10 && memcmp(line, "a=recvonly", 10) == 0) {
+                                static const char repl[] = "a=sendrecv";
+                                emit_line = repl;
+                                emit_len = (int)sizeof(repl) - 1;
+                                rewritten_recvonly++;
+                            }
+
+                            if (!skip_line) {
+                                if (emit_len == prev_line_len && emit_len > 0 && memcmp(emit_line, prev_line, emit_len) == 0) {
+                                    dedup_lines++;
+                                } else {
+                                    if (copy_sdp_line(patched, patched_cap, &patched_len, emit_line, emit_len) != 0) {
+                                        break;
+                                    }
+                                    int save_len = emit_len < (int)sizeof(prev_line) - 1 ? emit_len : (int)sizeof(prev_line) - 1;
+                                    memcpy(prev_line, emit_line, save_len);
+                                    prev_line[save_len] = 0;
+                                    prev_line_len = save_len;
                                 }
-                                int save_len = emit_len < (int)sizeof(prev_line) - 1 ? emit_len : (int)sizeof(prev_line) - 1;
-                                memcpy(prev_line, emit_line, save_len);
-                                prev_line[save_len] = 0;
-                                prev_line_len = save_len;
+
+                                if (is_mline && section_idx >= 0) {
+                                    int w = snprintf(patched + patched_len, patched_cap - patched_len, "a=mid:%d\r\n", section_idx);
+                                    if (w > 0 && patched_len + w < patched_cap) {
+                                        patched_len += w;
+                                        injected_mid++;
+                                        section_has_mid = true;
+                                    }
+                                }
                             }
 
                             if ((line_len >= 10 && memcmp(line, "a=recvonly", 10) == 0) ||
@@ -913,8 +994,9 @@ static int signal_new_msg(esp_peer_signaling_msg_t *msg, void *ctx)
                     }
                     peer_msg.data = (uint8_t *)patched;
                     peer_msg.size = patched_len;
-                    ESP_LOGI(TAG, "Normalized SDP: %d -> %d bytes, dedup_lines=%d, injected_mid=%d",
-                             msg->size, patched_len, dedup_lines, injected_mid);
+                    ESP_LOGI(TAG, "Normalized SDP: %d -> %d bytes, dedup_lines=%d, injected_mid=%d, rew_recvonly=%d, drop_mid=%d",
+                             msg->size, patched_len, dedup_lines, injected_mid, rewritten_recvonly, dropped_mid_lines);
+                    ESP_LOGI(TAG, "Patched remote SDP:\n%.*s", patched_len, patched);
                 } else {
                     peer_msg.data = (uint8_t *)normalized;
                     peer_msg.size = out;

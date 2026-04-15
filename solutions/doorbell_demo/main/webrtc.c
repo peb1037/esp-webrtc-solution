@@ -189,12 +189,18 @@ int start_webrtc(char *url)
     esp_webrtc_cfg_t cfg = {
         .peer_cfg = {
             .audio_info = {
+#if WEBRTC_USE_LIVEKIT_WHIP
+                .codec = ESP_PEER_AUDIO_CODEC_OPUS,
+                .sample_rate = 16000,
+                .channel = 1,
+#else
 #ifdef WEBRTC_SUPPORT_OPUS
                 .codec = ESP_PEER_AUDIO_CODEC_OPUS,
                 .sample_rate = 16000,
                 .channel = 1,
 #else
                 .codec = ESP_PEER_AUDIO_CODEC_G711A,
+#endif
 #endif
             },
             .video_info = {
@@ -203,8 +209,18 @@ int start_webrtc(char *url)
                 .height = VIDEO_HEIGHT,
                 .fps = VIDEO_FPS,
             },
-            .audio_dir = ESP_PEER_MEDIA_DIR_SEND_RECV,
-            .video_dir = ESP_PEER_MEDIA_DIR_SEND_RECV,
+            .audio_dir =
+#if WEBRTC_USE_LIVEKIT_WHIP
+                ESP_PEER_MEDIA_DIR_SEND_ONLY,
+#else
+                ESP_PEER_MEDIA_DIR_SEND_RECV,
+#endif
+            .video_dir =
+#if WEBRTC_USE_LIVEKIT_WHIP
+                ESP_PEER_MEDIA_DIR_SEND_ONLY,
+#else
+                ESP_PEER_MEDIA_DIR_SEND_RECV,
+#endif
             .on_custom_data = door_bell_on_cmd,
             .enable_data_channel = DATA_CHANNEL_ENABLED,
             .no_auto_reconnect =
@@ -290,6 +306,11 @@ void query_webrtc(void)
     if (webrtc) {
         esp_webrtc_query(webrtc);
     }
+}
+
+bool is_webrtc_active(void)
+{
+    return webrtc != NULL;
 }
 
 int stop_webrtc(void)
