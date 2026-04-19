@@ -19,9 +19,9 @@ extern "C" {
  * @brief  Video resolution settings
  */
 #if CONFIG_IDF_TARGET_ESP32P4
-#define VIDEO_WIDTH  640
-#define VIDEO_HEIGHT 360
-#define VIDEO_FPS    10
+#define VIDEO_WIDTH  1280
+#define VIDEO_HEIGHT 960
+#define VIDEO_FPS    15
 #else
 #define VIDEO_WIDTH  320
 #define VIDEO_HEIGHT 240
