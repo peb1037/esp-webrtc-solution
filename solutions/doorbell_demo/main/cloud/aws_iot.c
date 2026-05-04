@@ -94,7 +94,7 @@ bool aws_iot_is_connected(void)
     return s_connected;
 }
 
-static const char *cert_ptr_or_null(const uint8_t *start, const uint8_t *end)
+      static const char *cert_ptr_or_null(const uint8_t *start, const uint8_t *end)
 {
     if (!start || !end || end <= start) {
         return NULL;
